@@ -1,22 +1,106 @@
 import streamlit as st
 import numpy as np
-import cv2
 import tensorflow as tf
-from PIL import Image
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
-import matplotlib.cm as cm
+import cv2
 
-# -------------------------------
-# Load Model
-# -------------------------------
+from tensorflow.keras.models import load_model
+from PIL import Image
+
+
+# =========================================================
+# PAGE CONFIG
+# =========================================================
+
+st.set_page_config(
+    page_title="Brain Tumor Detection AI",
+    page_icon="🧠",
+    layout="wide"
+)
+
+
+# =========================================================
+# CUSTOM CSS
+# =========================================================
+
+st.markdown("""
+<style>
+.main {
+    background-color: #f5f7fb;
+}
+
+.title {
+    text-align: center;
+    font-size: 42px;
+    font-weight: 700;
+    margin-bottom: 5px;
+}
+
+.subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 18px;
+    margin-bottom: 30px;
+}
+
+.result-box {
+    padding: 25px;
+    border-radius: 15px;
+    background-color: white;
+    box-shadow: 0px 3px 12px rgba(0,0,0,0.08);
+    margin-top: 15px;
+}
+
+.prediction {
+    font-size: 30px;
+    font-weight: bold;
+}
+
+.confidence {
+    font-size: 22px;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# =========================================================
+# HEADER
+# =========================================================
+
+st.markdown(
+    '<div class="title">🧠 Brain Tumor Detection AI</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'Deep Learning Based Brain MRI Classification using ResNet50'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+
+# =========================================================
+# MODEL
+# =========================================================
+
 @st.cache_resource
-def load_trained_model():
+def load_brain_model():
     return load_model("best_model.keras")
 
-model = load_trained_model()
 
-# Class Names
+try:
+    model = load_brain_model()
+except Exception as e:
+    st.error("❌ Could not load the trained model.")
+    st.exception(e)
+    st.stop()
+
+
+# =========================================================
+# CLASSES
+# =========================================================
+
 class_names = [
     "Glioma",
     "Meningioma",
@@ -24,152 +108,431 @@ class_names = [
     "Pituitary"
 ]
 
-# -------------------------------
-# Prediction Function
-# -------------------------------
-def predict(img):
 
-    img = img.resize((224,224))
+# =========================================================
+# DISEASE INFORMATION
+# =========================================================
 
-    img_array = image.img_to_array(img)
+disease_info = {
+    "Glioma": {
+        "title": "🧠 Glioma",
+        "description": """
+Glioma is a tumor that develops from glial cells in the
+brain or spinal cord.
 
-    img_array = img_array/255.0
+Its behavior can vary depending on its type, grade and
+location. Possible symptoms include headaches, seizures,
+vision or speech changes, memory problems and behavioral
+changes.
+"""
+    },
 
-    img_array = np.expand_dims(img_array,axis=0)
+    "Meningioma": {
+        "title": "🧠 Meningioma",
+        "description": """
+Meningioma is a tumor that develops from the meninges,
+the protective membranes surrounding the brain and spinal
+cord.
 
-    prediction = model.predict(img_array, verbose=0)
+Many meningiomas grow slowly. Depending on their size and
+location, they may cause headaches, seizures, vision
+problems, weakness or cognitive changes.
+"""
+    },
 
-    predicted_index = np.argmax(prediction)
+    "No Tumor": {
+        "title": "✅ No Tumor Detected",
+        "description": """
+The model classified this MRI image into the "No Tumor"
+category.
 
-    confidence = float(np.max(prediction)*100)
+This category represents MRI images labeled as not
+containing a brain tumor in the dataset used for training.
 
-    return prediction, predicted_index, confidence
+This prediction should not be considered medical
+confirmation that a person is free from disease.
+"""
+    },
+
+    "Pituitary": {
+        "title": "🧠 Pituitary Tumor",
+        "description": """
+Pituitary tumors develop in the pituitary gland, located
+at the base of the brain.
+
+Many are non-cancerous. Depending on their size and effect
+on hormone production, they may cause headaches, vision
+changes or hormonal changes.
+"""
+    }
+}
 
 
-# -------------------------------
-# GradCAM
-# -------------------------------
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name):
+# =========================================================
+# PREPROCESS IMAGE
+# =========================================================
+
+def preprocess_image(uploaded_file):
+    """Load and prepare MRI image for the model."""
+
+    img = Image.open(uploaded_file).convert("RGB")
+    resized = img.resize((224, 224))
+
+    img_array = np.array(resized).astype("float32")
+    img_array /= 255.0
+
+    img_array = np.expand_dims(img_array, axis=0)
+
+    return img, img_array
+
+
+# =========================================================
+# GRAD-CAM
+# =========================================================
+
+def make_gradcam(img_array, predicted_index):
+    """Generate Grad-CAM heatmap."""
+
+    last_conv_layer = model.get_layer("conv5_block3_out")
 
     grad_model = tf.keras.models.Model(
-        model.inputs,
-        [model.get_layer(last_conv_layer_name).output,
-         model.output]
+        inputs=model.inputs,
+        outputs=[
+            last_conv_layer.output,
+            model.output
+        ]
     )
 
     with tf.GradientTape() as tape:
 
         conv_outputs, predictions = grad_model(img_array)
 
-        pred_index = tf.argmax(predictions[0])
+        class_channel = predictions[:, predicted_index]
 
-        class_channel = predictions[:, pred_index]
+    gradients = tape.gradient(
+        class_channel,
+        conv_outputs
+    )
 
-    grads = tape.gradient(class_channel, conv_outputs)
-
-    pooled_grads = tf.reduce_mean(grads, axis=(0,1,2))
+    pooled_gradients = tf.reduce_mean(
+        gradients,
+        axis=(0, 1, 2)
+    )
 
     conv_outputs = conv_outputs[0]
 
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-
+    heatmap = conv_outputs @ pooled_gradients[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
 
-    heatmap = tf.maximum(heatmap,0) / tf.math.reduce_max(heatmap)
+    heatmap = tf.maximum(heatmap, 0)
+
+    max_value = tf.reduce_max(heatmap)
+
+    if max_value > 0:
+        heatmap /= max_value
 
     return heatmap.numpy()
 
 
-# -------------------------------
-# Streamlit UI
-# -------------------------------
-st.set_page_config(
-    page_title="Brain Tumor Detection",
-    page_icon="🧠",
-    layout="wide"
+# =========================================================
+# CREATE GRAD-CAM OVERLAY
+# =========================================================
+
+def create_gradcam_overlay(original_image, heatmap):
+    """Overlay Grad-CAM heatmap on original MRI."""
+
+    original = np.array(original_image)
+
+    heatmap = cv2.resize(
+        heatmap,
+        (original.shape[1], original.shape[0])
+    )
+
+    heatmap = np.uint8(255 * heatmap)
+
+    heatmap_color = cv2.applyColorMap(
+        heatmap,
+        cv2.COLORMAP_JET
+    )
+
+    heatmap_color = cv2.cvtColor(
+        heatmap_color,
+        cv2.COLOR_BGR2RGB
+    )
+
+    overlay = cv2.addWeighted(
+        original,
+        0.6,
+        heatmap_color,
+        0.4,
+        0
+    )
+
+    return overlay
+
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+
+with st.sidebar:
+
+    st.header("🧠 About This Project")
+
+    st.write(
+        "A deep learning application that classifies "
+        "brain MRI images into four categories."
+    )
+
+    st.divider()
+
+    st.subheader("🤖 Model")
+
+    st.write("Architecture: ResNet50")
+    st.write("Input Size: 224 × 224")
+    st.write("Classes: 4")
+    st.write("Framework: TensorFlow / Keras")
+
+    st.divider()
+
+    st.subheader("📂 Classes")
+
+    for cls in class_names:
+        st.write(f"• {cls}")
+
+    st.divider()
+
+    st.subheader("📈 Performance")
+
+    st.metric(
+        "Test Accuracy",
+        "74.87%"
+    )
+
+    st.divider()
+
+    st.info(
+        "Educational and research project only. "
+        "The prediction is not a medical diagnosis."
+    )
+
+
+# =========================================================
+# UPLOAD
+# =========================================================
+
+st.header("📤 Upload Brain MRI")
+
+st.write(
+    "Upload an MRI image to classify it using the "
+    "trained ResNet50 model."
 )
-
-st.title("🧠 Brain Tumor Detection using ResNet50")
-
-st.write("Upload an MRI Scan to detect Brain Tumor.")
 
 uploaded_file = st.file_uploader(
-    "Choose MRI Image",
-    type=["jpg","jpeg","png"]
+    "Choose an MRI image",
+    type=["jpg", "jpeg", "png"]
 )
 
-if uploaded_file is not None:
 
-    img = Image.open(uploaded_file).convert("RGB")
+# =========================================================
+# MAIN APPLICATION
+# =========================================================
 
-    col1,col2 = st.columns(2)
+if uploaded_file is None:
+
+    st.info(
+        "👆 Upload a brain MRI image above to start "
+        "the prediction."
+    )
+
+else:
+
+    # -----------------------------------------------------
+    # IMAGE PREPROCESSING
+    # -----------------------------------------------------
+
+    original_image, img_array = preprocess_image(
+        uploaded_file
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # PREDICTION
+    # -----------------------------------------------------
+
+    predictions = model.predict(
+        img_array,
+        verbose=0
+    )[0]
+
+    predicted_index = int(
+        np.argmax(predictions)
+    )
+
+    predicted_class = class_names[
+        predicted_index
+    ]
+
+    confidence = float(
+        predictions[predicted_index] * 100
+    )
+
+    # -----------------------------------------------------
+    # IMAGE + RESULT
+    # -----------------------------------------------------
+
+    col1, col2 = st.columns(2)
 
     with col1:
-        st.image(img,width=350)
 
-    if st.button("Predict"):
+        st.subheader("🖼️ Uploaded MRI")
 
-        prediction,predicted_index,confidence = predict(img)
+        st.image(
+            original_image,
+            use_container_width=True
+        )
+
+    with col2:
+
+        st.subheader("🔍 AI Prediction")
+
+        st.markdown(
+            f"""
+            <div class="result-box">
+                <div class="prediction">
+                    {predicted_class}
+                </div>
+                <br>
+                <div class="confidence">
+                    Model Confidence: {confidence:.2f}%
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    # -----------------------------------------------------
+    # PROBABILITIES
+    # -----------------------------------------------------
+
+    st.divider()
+
+    st.subheader("📊 Class Probabilities")
+
+    for cls, probability in zip(
+        class_names,
+        predictions
+    ):
+
+        percentage = float(
+            probability * 100
+        )
+
+        st.write(
+            f"**{cls}: {percentage:.2f}%**"
+        )
+
+        st.progress(
+            float(probability)
+        )
+
+    # -----------------------------------------------------
+    # DISEASE INFORMATION
+    # -----------------------------------------------------
+
+    st.divider()
+
+    st.header("📚 About the Predicted Condition")
+
+    info = disease_info[predicted_class]
+
+    st.subheader(info["title"])
+
+    st.write(info["description"])
+
+    st.warning(
+        """
+        ⚠️ **Medical Disclaimer**
+
+        This AI prediction is for educational and research
+        purposes only. It is not a medical diagnosis and
+        should not replace evaluation by a qualified
+        healthcare professional.
+        """
+    )
+
+   
+
+    # -----------------------------------------------------
+    # GRAD-CAM
+    # -----------------------------------------------------
+
+    st.divider()
+
+    st.header("🔥 Grad-CAM Visualization")
+
+    st.write(
+        """
+        Grad-CAM (Gradient-weighted Class Activation Mapping)
+        helps visualize the regions of the MRI that contributed
+        to the model's prediction.
+        """
+    )
+
+    try:
+
+        heatmap = make_gradcam(
+            img_array,
+            predicted_index
+        )
+
+        gradcam_image = create_gradcam_overlay(
+            original_image,
+            heatmap
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.subheader("🖼️ Original MRI")
+
+            st.image(
+                original_image,
+                use_container_width=True
+            )
 
         with col2:
 
-            st.subheader("Prediction")
+            st.subheader("🔥 Grad-CAM Heatmap")
 
-            st.success(class_names[predicted_index])
-
-            st.metric(
-                "Confidence",
-                f"{confidence:.2f}%"
+            st.image(
+                gradcam_image,
+                use_container_width=True
             )
 
-            st.subheader("Class Probabilities")
-
-            for i,name in enumerate(class_names):
-
-                st.progress(float(prediction[0][i]))
-
-                st.write(
-                    f"{name} : {prediction[0][i]*100:.2f}%"
-                )
-
-        # -------------------------------
-        # GradCAM
-        # -------------------------------
-
-        img2 = img.resize((224,224))
-
-        img_array = image.img_to_array(img2)
-
-        img_array = img_array/255.0
-
-        img_array = np.expand_dims(img_array,axis=0)
-
-        heatmap = make_gradcam_heatmap(
-            img_array,
-            model,
-            "conv5_block3_out"
+        st.success(
+            "✅ Grad-CAM generated successfully."
         )
 
-        heatmap = np.uint8(255*heatmap)
+    except Exception as e:
 
-        jet = cm.get_cmap("jet")
+        st.error(
+            "❌ Grad-CAM could not be generated."
+        )
 
-        jet_colors = jet(np.arange(256))[:,:3]
+        st.exception(e)
 
-        jet_heatmap = jet_colors[heatmap]
 
-        jet_heatmap = tf.keras.preprocessing.image.array_to_img(jet_heatmap)
+# =========================================================
+# FOOTER
+# =========================================================
 
-        jet_heatmap = jet_heatmap.resize((224,224))
+st.divider()
 
-        jet_heatmap = tf.keras.preprocessing.image.img_to_array(jet_heatmap)
-
-        original = np.array(img2)
-
-        superimposed = jet_heatmap*0.4 + original
-
-        superimposed = np.uint8(superimposed)
-
-        st.subheader("Grad-CAM Heatmap")
-
-        st.image(superimposed,width=350)
+st.caption(
+    "🧠 Brain Tumor Detection | ResNet50 | "
+    "TensorFlow/Keras | Grad-CAM | "
+    "Educational Project"
+)
